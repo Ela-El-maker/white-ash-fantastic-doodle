@@ -165,12 +165,3 @@ data/
       video.mp4
       thumb.jpg
 ```
-
-## Replaceability
-
-The HTTP contract is stable. To swap this with Azure later, keep the API layer and asset response schema unchanged and replace only:
-
-- the storage implementation
-- the queue implementation
-- the media engine implementation
-- the URL generation strategy
