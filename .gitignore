@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Runtime data produced by local processing
+data/assets/
+data/video-assets.json
+data/*.mp4
+
+# Local media fixtures
+assets/*.mp4
+assets/*.MP4
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and diagnostics
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Test and coverage artifacts
+coverage/
+.nyc_output/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
