@@ -13,7 +13,7 @@ export const config = {
   baseUrl: process.env.BASE_URL ?? `http://localhost:${process.env.PORT ?? 4000}`,
   dataRoot,
   assetRoot: path.join(dataRoot, 'assets'),
-  repositoryPath: path.join(dataRoot, 'video-assets.json'),
+  repositoryPath: path.join(dataRoot, 'asset-records.json'),
   maxUploadBytes: 100 * 1024 * 1024,
   maxHeight: 480,
   ffmpegPath: process.env.FFMPEG_PATH ?? bundledFfmpegPath ?? 'ffmpeg',

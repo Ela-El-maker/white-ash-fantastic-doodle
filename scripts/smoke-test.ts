@@ -81,13 +81,14 @@ async function main(): Promise<void> {
   const bytes = await fs.readFile(samplePath);
   form.append('file', new Blob([bytes], { type: 'video/mp4' }), 'sample-input.mp4');
 
-  const uploadResponse = await fetch(`${baseUrl}/video/upload`, {
+  const uploadResponse = await fetch(`${baseUrl}/assets/upload`, {
     method: 'POST',
     body: form,
   });
 
-  const uploadJson = await uploadResponse.json() as { assetId: string; status: string };
+  const uploadJson = await uploadResponse.json() as { assetId: string; kind: string; status: string };
   assert(uploadResponse.status === 202, `Expected 202 from upload, got ${uploadResponse.status}`);
+  assert(uploadJson.kind === 'video', `Expected video kind from upload, got ${uploadJson.kind}`);
   assert(uploadJson.status === 'queued', `Expected queued upload status, got ${uploadJson.status}`);
   assert(Boolean(uploadJson.assetId), 'Upload response is missing assetId');
 
@@ -95,7 +96,7 @@ async function main(): Promise<void> {
   let terminalPayload: Record<string, unknown> | null = null;
   for (let i = 0; i < 40; i += 1) {
     await wait(500);
-    const statusResponse = await fetch(`${baseUrl}/video/${uploadJson.assetId}`);
+    const statusResponse = await fetch(`${baseUrl}/assets/${uploadJson.assetId}`);
     const statusJson = await statusResponse.json() as Record<string, unknown>;
 
     if (statusJson.status === 'ready' || statusJson.status === 'failed') {
@@ -108,13 +109,14 @@ async function main(): Promise<void> {
   assert(terminalState !== null, 'Asset did not reach terminal state within timeout.');
   assert(terminalState === 'ready', `Expected terminal ready state, got ${terminalState}`);
   assert(terminalPayload, 'Missing terminal payload.');
-  assert(typeof terminalPayload.playbackUrl === 'string', 'Expected playbackUrl in terminal payload.');
+  assert(terminalPayload.kind === 'video', `Expected video kind in terminal payload, got ${String(terminalPayload.kind)}`);
+  assert(typeof terminalPayload.originalUrl === 'string', 'Expected originalUrl in terminal payload.');
   assert(typeof terminalPayload.thumbnailUrl === 'string', 'Expected thumbnailUrl in terminal payload.');
   assert(Array.isArray(terminalPayload.renditions), 'Expected renditions array in terminal payload.');
   assert((terminalPayload.renditions as unknown[]).length > 0, 'Expected at least one rendition.');
-  assert(typeof terminalPayload.duration === 'number', 'Expected duration number in terminal payload.');
+  assert(typeof terminalPayload.durationSeconds === 'number', 'Expected durationSeconds number in terminal payload.');
 
-  const playbackUrl = String(terminalPayload.playbackUrl);
+  const playbackUrl = String(terminalPayload.originalUrl);
   const thumbUrl = String(terminalPayload.thumbnailUrl);
   const [playbackResponse, thumbnailResponse] = await Promise.all([
     fetch(playbackUrl),

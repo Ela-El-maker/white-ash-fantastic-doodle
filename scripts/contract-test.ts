@@ -5,7 +5,13 @@ import ffmpegStatic from 'ffmpeg-static';
 
 const baseUrl = process.env.BASE_URL ?? 'http://127.0.0.1:4000';
 const samplePath = path.join(process.cwd(), 'data', 'sample-input.mp4');
-const oversizedPath = path.join(process.cwd(), 'data', 'oversized-input.mp4');
+const sampleImagePath = path.join(process.cwd(), 'data', 'sample-image.png');
+const samplePdfPath = path.join(process.cwd(), 'data', 'sample.pdf');
+const sampleZipPath = path.join(process.cwd(), 'data', 'sample.zip');
+const sampleDocxPath = path.join(process.cwd(), 'data', 'sample.docx');
+const sampleXlsxPath = path.join(process.cwd(), 'data', 'sample.xlsx');
+const sampleSupplementaryPath = path.join(process.cwd(), 'data', 'sample-resource.bin');
+const corruptPdfPath = path.join(process.cwd(), 'data', 'corrupt.pdf');
 
 async function wait(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -69,9 +75,33 @@ async function ensureSampleVideo(): Promise<void> {
   ]);
 }
 
-async function ensureOversizedFile(): Promise<void> {
-  const bytes = Buffer.alloc(2 * 1024 * 1024 + 32, 1);
-  await fs.writeFile(oversizedPath, bytes);
+async function ensureSampleFiles(): Promise<void> {
+  await fs.mkdir(path.dirname(sampleImagePath), { recursive: true });
+
+  const png1x1 = Buffer.from(
+    '89504E470D0A1A0A0000000D4948445200000001000000010802000000907753DE0000000C49444154789C63F8FFFF3F0005FE02FEA7B5A1D90000000049454E44AE426082',
+    'hex',
+  );
+  await fs.writeFile(sampleImagePath, png1x1);
+
+  const minimalPdf = Buffer.from([
+    ...Buffer.from('%PDF-1.4\n', 'ascii'),
+    ...Buffer.from('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n', 'ascii'),
+    ...Buffer.from('2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n', 'ascii'),
+    ...Buffer.from('3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n', 'ascii'),
+    ...Buffer.from('trailer\n<< /Root 1 0 R >>\n%%EOF\n', 'ascii'),
+  ]);
+  await fs.writeFile(samplePdfPath, minimalPdf);
+
+  const zipLike = Buffer.from([0x50, 0x4b, 0x03, 0x04, 20, 0, 0, 0, 0, 0, 0, 0]);
+  await fs.writeFile(sampleZipPath, zipLike);
+  await fs.writeFile(sampleDocxPath, zipLike);
+  await fs.writeFile(sampleXlsxPath, zipLike);
+
+  const supplementary = Buffer.from('supplementary resource bytes', 'utf8');
+  await fs.writeFile(sampleSupplementaryPath, supplementary);
+
+  await fs.writeFile(corruptPdfPath, Buffer.from('not-a-real-pdf', 'utf8'));
 }
 
 async function healthCheck(): Promise<void> {
@@ -83,12 +113,13 @@ async function uploadFile(
   filePath: string,
   mimeType: string,
   filename: string,
+  route: '/assets/upload' | '/video/upload' = '/assets/upload',
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const bytes = await fs.readFile(filePath);
   const form = new FormData();
   form.append('file', new Blob([bytes], { type: mimeType }), filename);
 
-  const response = await fetch(`${baseUrl}/video/upload`, {
+  const response = await fetch(`${baseUrl}${route}`, {
     method: 'POST',
     body: form,
   });
@@ -100,7 +131,7 @@ async function uploadFile(
 async function pollTerminal(assetId: string): Promise<Record<string, unknown>> {
   for (let i = 0; i < 60; i += 1) {
     await wait(500);
-    const response = await fetch(`${baseUrl}/video/${assetId}`);
+    const response = await fetch(`${baseUrl}/assets/${assetId}`);
     assert(response.status === 200, `Expected poll 200, got ${response.status}`);
     const body = await response.json() as Record<string, unknown>;
     if (body.status === 'ready' || body.status === 'failed') {
@@ -114,34 +145,143 @@ async function pollTerminal(assetId: string): Promise<Record<string, unknown>> {
 async function testHappyPath(): Promise<void> {
   const upload = await uploadFile(samplePath, 'video/mp4', 'sample-input.mp4');
   assert(upload.status === 202, `Happy path upload expected 202, got ${upload.status}`);
+  assert(upload.body.kind === 'video', `Expected video kind, got ${String(upload.body.kind)}`);
   assert(upload.body.status === 'queued', `Expected queued, got ${String(upload.body.status)}`);
   const assetId = String(upload.body.assetId ?? '');
   assert(assetId.length > 0, 'Expected assetId from happy path upload');
 
   const terminal = await pollTerminal(assetId);
   assert(terminal.status === 'ready', `Expected ready terminal, got ${String(terminal.status)}`);
-  assert(typeof terminal.playbackUrl === 'string', 'Expected playbackUrl for ready asset');
+  assert(terminal.kind === 'video', `Expected terminal kind video, got ${String(terminal.kind)}`);
+  assert(typeof terminal.originalUrl === 'string', 'Expected originalUrl for ready asset');
   assert(typeof terminal.thumbnailUrl === 'string', 'Expected thumbnailUrl for ready asset');
-  assert(typeof terminal.duration === 'number', 'Expected duration for ready asset');
+  assert(typeof terminal.durationSeconds === 'number', 'Expected durationSeconds for ready asset');
   assert(Array.isArray(terminal.renditions), 'Expected renditions array for ready asset');
   assert((terminal.renditions as unknown[]).length > 0, 'Expected non-empty renditions for ready asset');
+
+  const [playback, thumb, download] = await Promise.all([
+    fetch(String(terminal.originalUrl)),
+    fetch(String(terminal.thumbnailUrl)),
+    fetch(String(terminal.downloadUrl)),
+  ]);
+  assert(playback.status === 200, `Expected video URL 200, got ${playback.status}`);
+  assert(thumb.status === 200, `Expected thumb URL 200, got ${thumb.status}`);
+  assert(download.status === 200, `Expected video download URL 200, got ${download.status}`);
+}
+
+async function testImagePipeline(): Promise<void> {
+  const upload = await uploadFile(sampleImagePath, 'image/png', 'cover.png');
+  assert(upload.status === 202, `Image upload expected 202, got ${upload.status}`);
+  assert(upload.body.kind === 'image', `Image upload expected image kind, got ${String(upload.body.kind)}`);
+
+  const assetId = String(upload.body.assetId ?? '');
+  const terminal = await pollTerminal(assetId);
+  assert(terminal.status === 'ready', `Image terminal expected ready, got ${String(terminal.status)}`);
+  assert(terminal.kind === 'image', `Image terminal expected image kind, got ${String(terminal.kind)}`);
+  assert(typeof terminal.width === 'number', 'Image terminal expected width');
+  assert(typeof terminal.height === 'number', 'Image terminal expected height');
+  assert(typeof terminal.originalUrl === 'string', 'Image terminal expected originalUrl');
+  assert(typeof terminal.thumbnailUrl === 'string', 'Image terminal expected thumbnailUrl');
+
+  const [original, thumb, download] = await Promise.all([
+    fetch(String(terminal.originalUrl)),
+    fetch(String(terminal.thumbnailUrl)),
+    fetch(String(terminal.downloadUrl)),
+  ]);
+  assert(original.status === 200, `Image original expected 200, got ${original.status}`);
+  assert(thumb.status === 200, `Image thumb expected 200, got ${thumb.status}`);
+  assert(download.status === 200, `Image download expected 200, got ${download.status}`);
+}
+
+async function testPdfPipeline(): Promise<void> {
+  const upload = await uploadFile(samplePdfPath, 'application/pdf', 'notes.pdf');
+  assert(upload.status === 202, `PDF upload expected 202, got ${upload.status}`);
+  assert(upload.body.kind === 'pdf', `PDF upload expected pdf kind, got ${String(upload.body.kind)}`);
+
+  const assetId = String(upload.body.assetId ?? '');
+  const terminal = await pollTerminal(assetId);
+  assert(terminal.status === 'ready', `PDF terminal expected ready, got ${String(terminal.status)}`);
+  assert(terminal.kind === 'pdf', `PDF terminal expected pdf kind, got ${String(terminal.kind)}`);
+  assert(typeof terminal.previewUrl === 'string', 'PDF terminal expected previewUrl');
+  assert(typeof terminal.downloadUrl === 'string', 'PDF terminal expected downloadUrl');
+  assert(typeof terminal.pageCount === 'number' || terminal.pageCount === null, 'PDF terminal expected pageCount or null');
+
+  const inlineResponse = await fetch(String(terminal.previewUrl));
+  assert(inlineResponse.status === 200, `PDF inline expected 200, got ${inlineResponse.status}`);
+  const inlineDisposition = inlineResponse.headers.get('content-disposition') ?? '';
+  assert(inlineDisposition.startsWith('inline'), 'PDF inline endpoint should use inline Content-Disposition');
+
+  const downloadResponse = await fetch(String(terminal.downloadUrl));
+  assert(downloadResponse.status === 200, `PDF download expected 200, got ${downloadResponse.status}`);
+  const downloadDisposition = downloadResponse.headers.get('content-disposition') ?? '';
+  assert(downloadDisposition.startsWith('attachment'), 'PDF download endpoint should use attachment Content-Disposition');
+}
+
+async function testFileKinds(): Promise<void> {
+  const cases: Array<{ filePath: string; mime: string; name: string; expectedKind: string }> = [
+    {
+      filePath: sampleDocxPath,
+      mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      name: 'worksheet.docx',
+      expectedKind: 'document',
+    },
+    {
+      filePath: sampleXlsxPath,
+      mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      name: 'grades.xlsx',
+      expectedKind: 'spreadsheet',
+    },
+    {
+      filePath: sampleZipPath,
+      mime: 'application/zip',
+      name: 'starter-files.zip',
+      expectedKind: 'archive',
+    },
+    {
+      filePath: sampleSupplementaryPath,
+      mime: 'application/octet-stream',
+      name: 'resource.bin',
+      expectedKind: 'supplementary',
+    },
+  ];
+
+  for (const testCase of cases) {
+    const upload = await uploadFile(testCase.filePath, testCase.mime, testCase.name);
+    assert(upload.status === 202, `${testCase.name} expected 202, got ${upload.status}`);
+    assert(upload.body.kind === testCase.expectedKind, `${testCase.name} expected ${testCase.expectedKind}`);
+
+    const terminal = await pollTerminal(String(upload.body.assetId ?? ''));
+    assert(terminal.status === 'ready', `${testCase.name} expected ready, got ${String(terminal.status)}`);
+    assert(terminal.kind === testCase.expectedKind, `${testCase.name} terminal kind mismatch`);
+    assert(typeof terminal.downloadUrl === 'string', `${testCase.name} expected downloadUrl`);
+
+    const download = await fetch(String(terminal.downloadUrl));
+    assert(download.status === 200, `${testCase.name} download expected 200, got ${download.status}`);
+  }
 }
 
 async function testInvalidMimeType(): Promise<void> {
-  const upload = await uploadFile(samplePath, 'text/plain', 'wrong-type.txt');
+  const upload = await uploadFile(samplePath, 'text/plain', 'wrong-type.mp4');
   assert(upload.status === 415, `Invalid MIME expected 415, got ${upload.status}`);
   assert(upload.body.status === 'failed', `Invalid MIME expected failed body status, got ${String(upload.body.status)}`);
 }
 
-async function testOversizedUpload(): Promise<void> {
-  const upload = await uploadFile(oversizedPath, 'video/mp4', 'oversized.mp4');
-  assert(upload.status === 413, `Oversized upload expected 413, got ${upload.status}`);
-  assert(upload.body.status === 'failed', `Oversized upload expected failed body status, got ${String(upload.body.status)}`);
+async function testSignatureMismatch(): Promise<void> {
+  const upload = await uploadFile(corruptPdfPath, 'application/pdf', 'corrupt.pdf');
+  assert(upload.status === 415, `Signature mismatch expected 415, got ${upload.status}`);
+  assert(upload.body.status === 'failed', `Signature mismatch expected failed body status, got ${String(upload.body.status)}`);
 }
 
 async function testCorruptVideo(): Promise<void> {
   const corruptPath = path.join(process.cwd(), 'data', 'corrupt.mp4');
-  await fs.writeFile(corruptPath, Buffer.from('this-is-not-a-real-mp4'));
+  const fakeMp4 = Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x18]),
+    Buffer.from('ftyp', 'ascii'),
+    Buffer.from('isom', 'ascii'),
+    Buffer.from('00000000', 'hex'),
+    Buffer.from('this-is-not-a-real-mp4', 'utf8'),
+  ]);
+  await fs.writeFile(corruptPath, fakeMp4);
 
   const upload = await uploadFile(corruptPath, 'video/mp4', 'corrupt.mp4');
   assert(upload.status === 202, `Corrupt upload should still be accepted initially, got ${upload.status}`);
@@ -156,7 +296,7 @@ async function testCorruptVideo(): Promise<void> {
 
 async function testMissingFile(): Promise<void> {
   const form = new FormData();
-  const response = await fetch(`${baseUrl}/video/upload`, {
+  const response = await fetch(`${baseUrl}/assets/upload`, {
     method: 'POST',
     body: form,
   });
@@ -172,26 +312,48 @@ async function testDelete(): Promise<void> {
   const assetId = String(upload.body.assetId ?? '');
   assert(assetId.length > 0, 'Delete test upload missing assetId');
 
-  const deleteResponse = await fetch(`${baseUrl}/video/${assetId}`, {
+  const deleteResponse = await fetch(`${baseUrl}/assets/${assetId}`, {
     method: 'DELETE',
   });
   assert(deleteResponse.status === 204, `Delete expected 204, got ${deleteResponse.status}`);
 
-  const getResponse = await fetch(`${baseUrl}/video/${assetId}`);
+  const getResponse = await fetch(`${baseUrl}/assets/${assetId}`);
   assert(getResponse.status === 404, `Deleted asset GET expected 404, got ${getResponse.status}`);
+}
+
+async function testVideoCompatibility(): Promise<void> {
+  const upload = await uploadFile(samplePath, 'video/mp4', 'legacy.mp4', '/video/upload');
+  assert(upload.status === 202, `Legacy /video/upload expected 202, got ${upload.status}`);
+  const assetId = String(upload.body.assetId ?? '');
+
+  const terminal = await pollTerminal(assetId);
+  assert(terminal.status === 'ready', `Legacy video expected ready in generic poll, got ${String(terminal.status)}`);
+
+  const legacyGet = await fetch(`${baseUrl}/video/${assetId}`);
+  assert(legacyGet.status === 200, `Legacy /video/:id expected 200, got ${legacyGet.status}`);
+  const legacyBody = await legacyGet.json() as Record<string, unknown>;
+  assert(typeof legacyBody.playbackUrl === 'string', 'Legacy response expected playbackUrl');
+  assert(typeof legacyBody.thumbnailUrl === 'string', 'Legacy response expected thumbnailUrl');
+
+  const wrongType = await uploadFile(sampleImagePath, 'image/png', 'image.png', '/video/upload');
+  assert(wrongType.status === 415, `Legacy /video/upload image expected 415, got ${wrongType.status}`);
 }
 
 async function main(): Promise<void> {
   await ensureSampleVideo();
-  await ensureOversizedFile();
+  await ensureSampleFiles();
   await healthCheck();
 
   await testHappyPath();
+  await testImagePipeline();
+  await testPdfPipeline();
+  await testFileKinds();
   await testInvalidMimeType();
-  await testOversizedUpload();
+  await testSignatureMismatch();
   await testCorruptVideo();
   await testMissingFile();
   await testDelete();
+  await testVideoCompatibility();
 
   console.log('contract-test:pass');
 }

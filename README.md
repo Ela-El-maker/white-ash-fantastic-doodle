@@ -1,6 +1,11 @@
-# Video Pipeline Service
+# Asset Pipeline Service
 
-A realistic local video processing backend that accepts MP4 uploads, validates them, stores them, extracts metadata with `ffprobe`, transcodes them with `ffmpeg`, generates a thumbnail, and exposes production-like playback URLs.
+A local asset processing backend that supports multiple asset classes through one upload entrypoint:
+
+- video: async media pipeline (ffprobe + ffmpeg + thumbnail)
+- image: lightweight metadata + thumbnail pipeline
+- pdf: previewable document pipeline with inline and download URLs
+- docx/xlsx/zip/supplementary files: storage + metadata + download pipeline
 
 ## Stack
 
@@ -15,7 +20,8 @@ A realistic local video processing backend that accepts MP4 uploads, validates t
 
 ## API Contract
 
-### `POST /video/upload`
+### `POST /assets/upload`
+
 Multipart form upload with field `file`.
 
 Response:
@@ -23,20 +29,30 @@ Response:
 ```json
 {
   "assetId": "string",
+  "kind": "video | image | pdf | document | spreadsheet | archive | supplementary",
   "status": "queued"
 }
 ```
 
-### `GET /video/:assetId`
+### `GET /assets/:assetId`
 
 ```json
 {
   "id": "string",
+  "kind": "video | image | pdf | document | spreadsheet | archive | supplementary",
   "status": "queued | uploading | processing | ready | failed",
-  "progress": 100,
-  "playbackUrl": "http://localhost:4000/assets/{id}/video.mp4",
+  "progress": 0,
+  "originalName": "lesson.mp4",
+  "mimeType": "video/mp4",
+  "sizeBytes": 123456,
+  "originalUrl": "http://localhost:4000/assets/{id}/video.mp4",
+  "previewUrl": "http://localhost:4000/assets/{id}/video.mp4",
   "thumbnailUrl": "http://localhost:4000/assets/{id}/thumb.jpg",
-  "duration": 2.02,
+  "downloadUrl": "http://localhost:4000/assets/{id}/download",
+  "width": 640,
+  "height": 360,
+  "durationSeconds": 2.02,
+  "pageCount": null,
   "renditions": [
     {
       "url": "http://localhost:4000/assets/{id}/video.mp4",
@@ -49,26 +65,46 @@ Response:
 }
 ```
 
-### `DELETE /video/:assetId`
+### `GET /assets/:assetId/download`
+
+Returns the processed or original file with `Content-Disposition: attachment`.
+
+### `GET /assets/:assetId/inline`
+
+For PDF assets, returns an inline preview response with `Content-Disposition: inline`.
+
+### `DELETE /assets/:assetId`
+
 Cancels active processing if needed and removes local files.
+
+## Backward Compatibility
+
+Legacy video endpoints remain available:
+
+- `POST /video/upload` (video-only guard)
+- `GET /video/:assetId` (legacy response shape with `playbackUrl`)
+- `DELETE /video/:assetId`
 
 ## Pipeline Stages
 
 1. Validation
 2. Ingestion
-3. Metadata extraction
-4. Transcoding
-5. Thumbnail generation
-6. Packaging/finalization
-7. Ready state
+3. Kind-specific processing
+4. Packaging/finalization
+5. Ready state
+
+Kind-specific processing:
+
+- video: ffprobe metadata, H.264/AAC transcode, thumbnail
+- image: image metadata extraction + thumbnail generation
+- pdf: page count extraction + inline preview URL
+- document/spreadsheet/archive/supplementary: storage finalization
 
 ## Progress Model
 
 - validation: 0-5
 - upload: 5-20
-- metadata: 20-30
-- transcode: 30-80
-- thumbnail: 80-90
+- processing: 20-90
 - finalize: 90-100
 
 State machine:
@@ -104,8 +140,8 @@ If `FFMPEG_PATH` / `FFPROBE_PATH` are not set, the service uses bundled `ffmpeg-
 ## Validation Rules
 
 - Upload field must be named `file`
-- MIME type must be `video/mp4` (`415` otherwise)
-- Max file size is `2MB` (`413` otherwise)
+- Extension + MIME + file signature checks are combined for classification
+- Max file size is `100MB` (`413` otherwise)
 - Empty files are rejected (`400`)
 
 ## Smoke Test
@@ -119,8 +155,9 @@ npm run test:smoke
 The smoke script auto-generates `data/sample-input.mp4` if needed and verifies:
 
 - upload returns `202` + `assetId`
+- upload kind is `video`
 - status reaches `ready`
-- `playbackUrl` and `thumbnailUrl` return `200`
+- `originalUrl` and `thumbnailUrl` return `200`
 
 ## Contract Test
 
@@ -132,45 +169,43 @@ npm run test:contract
 
 This validates:
 
-- happy path upload + poll to `ready`
-- invalid MIME (`415`)
-- oversize upload (`413`)
+- video/image/pdf/docx/xlsx/zip/supplementary happy paths
+- PDF inline/download behavior
+- MIME mismatch and signature mismatch rejection (`415`)
 - corrupt MP4 transitions to `failed`
 - missing file field (`400`)
 - delete flow (`204`, then `GET` -> `404`)
+- legacy `/video/*` compatibility
 
 ## Example cURL
 
 Upload:
 
 ```bash
-curl -X POST http://localhost:4000/video/upload \
+curl -X POST http://localhost:4000/assets/upload \
   -F "file=@./data/sample-input.mp4;type=video/mp4"
 ```
 
 Poll:
 
 ```bash
-curl http://localhost:4000/video/<assetId>
+curl http://localhost:4000/assets/<assetId>
+```
+
+Download:
+
+```bash
+curl -L http://localhost:4000/assets/<assetId>/download -o asset.bin
 ```
 
 ## Storage Layout
 
 ```text
 data/
-  video-assets.json
+  asset-records.json
   assets/
     <assetId>/
-      original.mp4
-      video.mp4
-      thumb.jpg
+      original.*
+      video.mp4 | image.* | file.pdf | file.*
+      thumb.*
 ```
-
-## Replaceability
-
-The HTTP contract is stable. To swap this with Azure later, keep the API layer and asset response schema unchanged and replace only:
-
-- the storage implementation
-- the queue implementation
-- the media engine implementation
-- the URL generation strategy

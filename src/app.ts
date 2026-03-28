@@ -1,12 +1,13 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
+import fs from 'node:fs';
 import { config } from './config.js';
-import { VideoPipelineService, UserInputError } from './services/video-pipeline-service.js';
+import { AssetPipelineService, UserInputError } from './services/asset-pipeline-service.js';
 import { InMemoryJobQueue } from './queue/in-memory-job-queue.js';
 
 export interface AppDependencies {
-  pipelineService: VideoPipelineService;
+  pipelineService: AssetPipelineService;
   queue: InMemoryJobQueue<string>;
 }
 
@@ -28,33 +29,94 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
 
   app.get('/health', async () => ({ status: 'ok' }));
 
+  app.post('/assets/upload', async (request, reply) => {
+    const file = await request.file();
+    if (!file) {
+      throw new UserInputError('Missing multipart file field named file.', 400);
+    }
+
+    const asset = await deps.pipelineService.createUploadTarget(file.filename, file.mimetype);
+    try {
+      const ingested = await deps.pipelineService.ingestUpload(asset.id, file.file, file.mimetype);
+      deps.queue.enqueue(asset.id);
+      return reply.code(202).send({
+        assetId: ingested.id,
+        kind: ingested.kind,
+        status: 'queued',
+      });
+    } catch (error) {
+      await deps.pipelineService.discardAsset(asset.id);
+      throw error;
+    }
+  });
+
+  app.get<{ Params: { assetId: string } }>('/assets/:assetId', async (request, reply) => {
+    const asset = deps.pipelineService.getAsset(request.params.assetId);
+    if (!asset) {
+      return reply.code(404).send({ message: 'Asset not found' });
+    }
+
+    return reply.send(asset);
+  });
+
+  app.delete<{ Params: { assetId: string } }>('/assets/:assetId', async (request, reply) => {
+    const deleted = await deps.pipelineService.cancelAndDelete(request.params.assetId);
+    if (!deleted) {
+      return reply.code(404).send({ message: 'Asset not found' });
+    }
+
+    return reply.code(204).send();
+  });
+
+  app.get<{ Params: { assetId: string } }>('/assets/:assetId/download', async (request, reply) => {
+    const resolved = deps.pipelineService.resolveDownload(request.params.assetId);
+    if (!resolved) {
+      return reply.code(404).send({ message: 'Asset not found or not ready' });
+    }
+
+    reply.header('content-disposition', contentDisposition('attachment', resolved.fileName));
+    reply.type(resolved.mimeType);
+    return reply.send(fs.createReadStream(resolved.filePath));
+  });
+
+  app.get<{ Params: { assetId: string } }>('/assets/:assetId/inline', async (request, reply) => {
+    const resolved = deps.pipelineService.resolveInline(request.params.assetId);
+    if (!resolved) {
+      return reply.code(404).send({ message: 'Asset not found or not inline-previewable' });
+    }
+
+    reply.header('content-disposition', contentDisposition('inline', resolved.fileName));
+    reply.type(resolved.mimeType);
+    return reply.send(fs.createReadStream(resolved.filePath));
+  });
+
   app.post('/video/upload', async (request, reply) => {
     const file = await request.file();
     if (!file) {
       throw new UserInputError('Missing multipart file field named file.', 400);
     }
 
-    if (file.mimetype !== 'video/mp4') {
-      throw new UserInputError('Invalid file type. Only video/mp4 is allowed.', 415);
-    }
-
-    const asset = await deps.pipelineService.createUploadTarget();
+    const asset = await deps.pipelineService.createUploadTarget(file.filename, file.mimetype);
     try {
-      await deps.pipelineService.ingestUpload(asset.id, file.file, file.mimetype);
+      const ingested = await deps.pipelineService.ingestUpload(asset.id, file.file, file.mimetype);
+      if (ingested.kind !== 'video') {
+        throw new UserInputError('Invalid file type. Only video/mp4 is allowed.', 415);
+      }
+
       deps.queue.enqueue(asset.id);
+
+      return reply.code(202).send({
+        assetId: ingested.id,
+        status: 'queued',
+      });
     } catch (error) {
       await deps.pipelineService.discardAsset(asset.id);
       throw error;
     }
-
-    return reply.code(202).send({
-      assetId: asset.id,
-      status: 'queued',
-    });
   });
 
   app.get<{ Params: { assetId: string } }>('/video/:assetId', async (request, reply) => {
-    const asset = deps.pipelineService.getAsset(request.params.assetId);
+    const asset = deps.pipelineService.getVideoAsset(request.params.assetId);
     if (!asset) {
       return reply.code(404).send({ message: 'Asset not found' });
     }
@@ -94,4 +156,9 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
   });
 
   return app;
+}
+
+function contentDisposition(type: 'inline' | 'attachment', fileName: string): string {
+  const escaped = fileName.replace(/"/g, '');
+  return `${type}; filename="${escaped}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
 }
