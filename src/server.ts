@@ -6,6 +6,7 @@ import { AssetPipelineService } from './services/asset-pipeline-service.js';
 import { FfmpegMediaEngine } from './services/ffmpeg-media-engine.js';
 import { GenericFileProcessor } from './services/processors/generic-file-processor.js';
 import { ImageProcessor } from './services/processors/image-processor.js';
+import { MediaToolchain } from './services/processors/media-toolchain.js';
 import { PdfProcessor } from './services/processors/pdf-processor.js';
 import { VideoProcessor } from './services/processors/video-processor.js';
 
@@ -14,10 +15,11 @@ async function main(): Promise<void> {
   await repository.init();
 
   const mediaEngine = new FfmpegMediaEngine();
+  const mediaToolchain = new MediaToolchain();
   const pipelineService = new AssetPipelineService(repository, mediaEngine, [
     new VideoProcessor(mediaEngine),
-    new ImageProcessor(),
-    new PdfProcessor(),
+    new ImageProcessor(mediaToolchain),
+    new PdfProcessor(mediaToolchain),
     new GenericFileProcessor(),
   ]);
   await pipelineService.init();

@@ -1,4 +1,6 @@
 import path from 'node:path';
+import fs from 'node:fs/promises';
+import JSZip from 'jszip';
 import { AssetKind, AssetSignature, ClassifiedAsset } from '../types.js';
 
 export class AssetValidationError extends Error {
@@ -185,6 +187,44 @@ export function classifyAsset(fileName: string, mimeType: string | undefined, by
     };
 }
 
+export async function validateOfficePackage(
+    filePath: string,
+    extension: 'docx' | 'xlsx',
+    fileName: string,
+): Promise<void> {
+    const bytes = await fs.readFile(filePath);
+    let zip: JSZip;
+
+    try {
+        zip = await JSZip.loadAsync(bytes);
+    } catch {
+        throw new AssetValidationError(`Invalid ${extension.toUpperCase()} package for ${fileName}.`, 415);
+    }
+
+    const entries = new Set(
+        Object.keys(zip.files)
+            .map((entry) => normalizeZipEntry(entry)),
+    );
+
+    const requiredCommonEntries = ['[content_types].xml', '_rels/.rels'];
+    for (const entry of requiredCommonEntries) {
+        if (!entries.has(entry)) {
+            throw new AssetValidationError(
+                `Invalid ${extension.toUpperCase()} package for ${fileName}: missing ${entry}.`,
+                415,
+            );
+        }
+    }
+
+    const requiredSpecificEntry = extension === 'docx' ? 'word/document.xml' : 'xl/workbook.xml';
+    if (!entries.has(requiredSpecificEntry)) {
+        throw new AssetValidationError(
+            `Invalid ${extension.toUpperCase()} package for ${fileName}: missing ${requiredSpecificEntry}.`,
+            415,
+        );
+    }
+}
+
 function normalizeMimeType(mimeType: string | undefined): string {
     if (!mimeType) {
         return '';
@@ -223,6 +263,10 @@ function validateSignature(
 function getExtension(fileName: string): string {
     const ext = path.extname(fileName).toLowerCase().replace('.', '');
     return ext;
+}
+
+function normalizeZipEntry(entry: string): string {
+    return entry.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
 }
 
 export function detectSignature(bytes: Buffer): AssetSignature {

@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import ffmpegStatic from 'ffmpeg-static';
+import JSZip from 'jszip';
 
 const baseUrl = process.env.BASE_URL ?? 'http://127.0.0.1:4000';
 const samplePath = path.join(process.cwd(), 'data', 'sample-input.mp4');
@@ -12,6 +13,8 @@ const sampleDocxPath = path.join(process.cwd(), 'data', 'sample.docx');
 const sampleXlsxPath = path.join(process.cwd(), 'data', 'sample.xlsx');
 const sampleSupplementaryPath = path.join(process.cwd(), 'data', 'sample-resource.bin');
 const corruptPdfPath = path.join(process.cwd(), 'data', 'corrupt.pdf');
+const invalidDocxPath = path.join(process.cwd(), 'data', 'invalid.docx');
+const invalidXlsxPath = path.join(process.cwd(), 'data', 'invalid.xlsx');
 
 async function wait(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -84,24 +87,62 @@ async function ensureSampleFiles(): Promise<void> {
   );
   await fs.writeFile(sampleImagePath, png1x1);
 
-  const minimalPdf = Buffer.from([
-    ...Buffer.from('%PDF-1.4\n', 'ascii'),
-    ...Buffer.from('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n', 'ascii'),
-    ...Buffer.from('2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n', 'ascii'),
-    ...Buffer.from('3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n', 'ascii'),
-    ...Buffer.from('trailer\n<< /Root 1 0 R >>\n%%EOF\n', 'ascii'),
-  ]);
+  const minimalPdf = createMinimalPdf();
   await fs.writeFile(samplePdfPath, minimalPdf);
 
   const zipLike = Buffer.from([0x50, 0x4b, 0x03, 0x04, 20, 0, 0, 0, 0, 0, 0, 0]);
   await fs.writeFile(sampleZipPath, zipLike);
-  await fs.writeFile(sampleDocxPath, zipLike);
-  await fs.writeFile(sampleXlsxPath, zipLike);
+
+  const commonOffice = {
+    '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>',
+    '_rels/.rels': '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>',
+  };
+
+  const docxZip = new JSZip();
+  docxZip.file('[Content_Types].xml', commonOffice['[Content_Types].xml']);
+  docxZip.file('_rels/.rels', commonOffice['_rels/.rels']);
+  docxZip.file('word/document.xml', '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p /></w:body></w:document>');
+  await fs.writeFile(sampleDocxPath, await docxZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+
+  const xlsxZip = new JSZip();
+  xlsxZip.file('[Content_Types].xml', commonOffice['[Content_Types].xml']);
+  xlsxZip.file('_rels/.rels', commonOffice['_rels/.rels']);
+  xlsxZip.file('xl/workbook.xml', '<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"></workbook>');
+  await fs.writeFile(sampleXlsxPath, await xlsxZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+
+  await fs.writeFile(invalidDocxPath, zipLike);
+  await fs.writeFile(invalidXlsxPath, zipLike);
 
   const supplementary = Buffer.from('supplementary resource bytes', 'utf8');
   await fs.writeFile(sampleSupplementaryPath, supplementary);
 
   await fs.writeFile(corruptPdfPath, Buffer.from('not-a-real-pdf', 'utf8'));
+}
+
+function createMinimalPdf(): Buffer {
+  const streamContent = 'BT /F1 18 Tf 72 100 Td (Hello PDF) Tj ET';
+  const object1 = '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n';
+  const object2 = '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n';
+  const object3 = '3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /MediaBox [0 0 300 144] /Contents 4 0 R >>\nendobj\n';
+  const object4 = `4 0 obj\n<< /Length ${Buffer.byteLength(streamContent, 'ascii')} >>\nstream\n${streamContent}\nendstream\nendobj\n`;
+  const object5 = '5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n';
+  const objects = [object1, object2, object3, object4, object5];
+
+  let body = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  for (const objectText of objects) {
+    offsets.push(Buffer.byteLength(body, 'ascii'));
+    body += objectText;
+  }
+
+  const xrefOffset = Buffer.byteLength(body, 'ascii');
+  let xref = 'xref\n0 6\n0000000000 65535 f \n';
+  for (const offset of offsets) {
+    xref += `${String(offset).padStart(10, '0')} 00000 n \n`;
+  }
+
+  const trailer = `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(body + xref + trailer, 'ascii');
 }
 
 async function healthCheck(): Promise<void> {
@@ -203,6 +244,7 @@ async function testPdfPipeline(): Promise<void> {
   assert(terminal.status === 'ready', `PDF terminal expected ready, got ${String(terminal.status)}`);
   assert(terminal.kind === 'pdf', `PDF terminal expected pdf kind, got ${String(terminal.kind)}`);
   assert(typeof terminal.previewUrl === 'string', 'PDF terminal expected previewUrl');
+  assert(typeof terminal.thumbnailUrl === 'string', 'PDF terminal expected thumbnailUrl');
   assert(typeof terminal.downloadUrl === 'string', 'PDF terminal expected downloadUrl');
   assert(typeof terminal.pageCount === 'number' || terminal.pageCount === null, 'PDF terminal expected pageCount or null');
 
@@ -215,6 +257,11 @@ async function testPdfPipeline(): Promise<void> {
   assert(downloadResponse.status === 200, `PDF download expected 200, got ${downloadResponse.status}`);
   const downloadDisposition = downloadResponse.headers.get('content-disposition') ?? '';
   assert(downloadDisposition.startsWith('attachment'), 'PDF download endpoint should use attachment Content-Disposition');
+
+  const thumbnailResponse = await fetch(String(terminal.thumbnailUrl));
+  assert(thumbnailResponse.status === 200, `PDF thumbnail expected 200, got ${thumbnailResponse.status}`);
+  const thumbnailType = thumbnailResponse.headers.get('content-type') ?? '';
+  assert(thumbnailType.includes('image/jpeg'), `PDF thumbnail expected image/jpeg, got ${thumbnailType}`);
 }
 
 async function testFileKinds(): Promise<void> {
@@ -270,6 +317,22 @@ async function testSignatureMismatch(): Promise<void> {
   const upload = await uploadFile(corruptPdfPath, 'application/pdf', 'corrupt.pdf');
   assert(upload.status === 415, `Signature mismatch expected 415, got ${upload.status}`);
   assert(upload.body.status === 'failed', `Signature mismatch expected failed body status, got ${String(upload.body.status)}`);
+}
+
+async function testInvalidOfficePackage(): Promise<void> {
+  const invalidDocx = await uploadFile(
+    invalidDocxPath,
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'invalid.docx',
+  );
+  assert(invalidDocx.status === 415, `Invalid DOCX package expected 415, got ${invalidDocx.status}`);
+
+  const invalidXlsx = await uploadFile(
+    invalidXlsxPath,
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'invalid.xlsx',
+  );
+  assert(invalidXlsx.status === 415, `Invalid XLSX package expected 415, got ${invalidXlsx.status}`);
 }
 
 async function testCorruptVideo(): Promise<void> {
@@ -350,6 +413,7 @@ async function main(): Promise<void> {
   await testFileKinds();
   await testInvalidMimeType();
   await testSignatureMismatch();
+  await testInvalidOfficePackage();
   await testCorruptVideo();
   await testMissingFile();
   await testDelete();

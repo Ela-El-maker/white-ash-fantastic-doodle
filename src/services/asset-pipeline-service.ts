@@ -8,7 +8,7 @@ import { config } from '../config.js';
 import { AssetRepository } from '../repository/asset-repository.js';
 import { AssetRecord, AssetResponse, VideoAssetResponse } from '../types.js';
 import { assetDir, ensureDir, joinUrl, removeIfExists } from '../utils/fs.js';
-import { classifyAsset, AssetValidationError } from './asset-classifier.js';
+import { classifyAsset, AssetValidationError, validateOfficePackage } from './asset-classifier.js';
 import { FfmpegMediaEngine, ProcessingCancelledError } from './ffmpeg-media-engine.js';
 import { AssetProcessor } from './processors/asset-processor.js';
 
@@ -191,6 +191,18 @@ export class AssetPipelineService {
         const expectedOriginalPath = path.join(path.dirname(asset.originalPath), `original.${classified.extension}`);
         if (expectedOriginalPath !== asset.originalPath) {
             await fsp.rename(asset.originalPath, expectedOriginalPath);
+        }
+
+        if (classified.extension === 'docx' || classified.extension === 'xlsx') {
+            try {
+                await validateOfficePackage(expectedOriginalPath, classified.extension, asset.originalName);
+            } catch (error) {
+                await removeIfExists(expectedOriginalPath);
+                if (error instanceof AssetValidationError) {
+                    throw new UserInputError(error.message, error.statusCode);
+                }
+                throw error;
+            }
         }
 
         return this.transition(assetId, {

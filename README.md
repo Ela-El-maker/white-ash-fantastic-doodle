@@ -14,6 +14,9 @@ A local asset processing backend that supports multiple asset classes through on
 - `@fastify/multipart` for multipart uploads
 - `@fastify/static` for direct asset playback URLs
 - Native `ffmpeg` / `ffprobe` (env override first, bundled static fallback)
+- `sharp` for image metadata and true thumbnail rendering
+- `pdfjs-dist` + `@napi-rs/canvas` for PDF page parsing and rendered preview thumbnails
+- `jszip` for DOCX/XLSX internal package validation
 - Local filesystem storage
 - Disk-backed JSON asset repository
 - In-process async queue
@@ -96,8 +99,8 @@ Legacy video endpoints remain available:
 Kind-specific processing:
 
 - video: ffprobe metadata, H.264/AAC transcode, thumbnail
-- image: image metadata extraction + thumbnail generation
-- pdf: page count extraction + inline preview URL
+- image: image metadata extraction + rendered JPEG thumbnail
+- pdf: page count extraction + rendered first-page thumbnail + inline preview URL
 - document/spreadsheet/archive/supplementary: storage finalization
 
 ## Progress Model
@@ -141,6 +144,7 @@ If `FFMPEG_PATH` / `FFPROBE_PATH` are not set, the service uses bundled `ffmpeg-
 
 - Upload field must be named `file`
 - Extension + MIME + file signature checks are combined for classification
+- DOCX/XLSX uploads must contain expected OpenXML ZIP entries (`[Content_Types].xml`, `_rels/.rels`, and kind-specific core XML)
 - Max file size is `100MB` (`413` otherwise)
 - Empty files are rejected (`400`)
 
@@ -170,8 +174,9 @@ npm run test:contract
 This validates:
 
 - video/image/pdf/docx/xlsx/zip/supplementary happy paths
-- PDF inline/download behavior
+- PDF inline/download/thumbnail behavior
 - MIME mismatch and signature mismatch rejection (`415`)
+- invalid DOCX/XLSX package structure rejection (`415`)
 - corrupt MP4 transitions to `failed`
 - missing file field (`400`)
 - delete flow (`204`, then `GET` -> `404`)
